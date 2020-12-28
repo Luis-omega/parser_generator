@@ -9,23 +9,20 @@ class ETable(Enum):
     shift_reduce = auto()
     reduce_reduce = auto()
     invalid = auto()
-
+    error = auto()
 
 class Production(NamedTuple):
     name : int
     definition : Tuple[int, ...]
-    terminal : bool = False
 
     def __contains__(self, other):
         return other in self.definition
+
 
 class Item(NamedTuple):
     production : Production
     dot : int
     look_ahead : Tuple[int, ...]
-
-    def __eq__(self, other):
-        return (self.dot == other.dot) and (self.production == other.production)
 
     def is_at_end(self):
         return self.dot == len(self.production.definition)
@@ -33,9 +30,35 @@ class Item(NamedTuple):
     def current(self):
         return self.production.definition[self.dot]
 
+    def to_string(self, grammar: "Grammar"):
+        name = grammar.names[self.production.name]
+        pre_dot = " ".join(map(lambda x: grammar.names[x], self.production.definition[:self.dot]))
+        pos_dot = " ".join(map(lambda x: grammar.names[x], self.production.definition[self.dot:]))
+        return f"{name} -> {pre_dot} · {pos_dot} {grammar.names[self.look_ahead[0]]}"
+
+class Grammar:
+    def __init__(self,
+        start : int,
+        productions: Dict[int, List[Production]],
+        terminals: Set[int],
+        empty: int,
+        names: List[str]
+        ):
+        self.start = start
+        self.productions = productions
+        self.terminals = terminals
+        self.names = names
+        self.empty = empty
+        self.input = len(names) 
+        terminals.add(len(names))
+        names.append("INPUT_SYMBOL")
+        self.end = len(names)
+        terminals.add(len(names))
+        names.append("END_SYMBOL")
 
 
-def list2dict(rules: List[Production])-> Dict[int, List[Production]]:
+
+def rules_list2dict(rules: List[Production])-> Dict[int, List[Production]] :
     out: Dict[int, List[Production]] = dict()
     for rule in rules :
         if rule.name in out : 
@@ -43,415 +66,314 @@ def list2dict(rules: List[Production])-> Dict[int, List[Production]]:
         else :
             out[rule.name] = [rule]
     return out
-        
+
+def names2productions(productions:List[List[str]], name2int:List[str])->List[Production]:
+    return [ Production(name2int[x[0]], tuple([name2int[y] for y in x[1:]])) for x in productions]
+
+def names2terminals(terminals: List[str], name2int:List[str])->Set[int]:
+    return set([name2int[i] for i in terminals])
 
 
-
-def clousure( items : List[Item], rules : Dict[int, Production], debug = None)-> List[Item]:
-    C = items 
-    added_new = True
-    while added_new : 
-        added_new = False
-        for item in C : 
-            if (not item.production.terminal) and (not item.is_at_end()):
-                for rule in rules[item.current()]:
-                    if not rule.terminal:
-                        new = Item(rule, 0, (0,))
-                        if not (new in C) :
-                            added_new = True
-                            C.append(new)
-    return C
-
-
+def first_on_rules(grammar: Grammar)-> Dict[int, Set[int]]:
+    out : Dict[int, Set[int]]= dict()
+    productions = grammar.productions
+    terminals = grammar.terminals
+    for key in productions:
+        out[key]=set()
     
-def primitive_goto(items: List[Item], start : int,
-        rules : Dict[int, Production], debug = None):
-    initial : List[Item] = []
-    for item in items : 
-        if (not item.production.terminal) and ( not item.is_at_end()):
-            if item.current() == start:
-                new = Item(item.production, 
-                    item.dot+1, item.look_ahead)
-                if not new in initial:
-                    initial.append(new)
-    return clousure(initial, rules, debug)
+    added = True
+    while added:
+        added=False
+        for key,rule in productions.items():
+            current_set = out[key]
+            for production in rule:
+                for count, elem in enumerate(production.definition):
+                    if elem in terminals:
+                        if (elem != grammar.empty) :
+                            if not(elem in current_set):
+                                out[key].add(elem)
+                                added=True
+                            break
+                    else :
+                        elem_set = out[elem]
+                        elem_no_null = elem_set - {grammar.empty}
+                        if not (elem_no_null <= current_set):
+                            current_set.update(elem_no_null)
+                            added=True
+                        if not grammar.empty in elem_set:
+                            break
 
-def check_state_conflicts(state : List[Item])->Tuple[List[Item],List[Item],List[Item]]:
-    shifts = []
-    reduces = []
-    for item in state:
-        if item.is_at_end():
-            reduces.append(item)
-        else : 
-            shifts.append(item)
-
-    if shifts and (not reduces):
-        return shifts, [], []
-    elif reduces and (not shifts):
-        rule_name = reduces[0].production.name
-        reduce_conflicts = [reduces[0]]
-        for item in reduces:
-            if item.production.name != rule_name:
-                reduce_conflicts.append(item)
-        if len(reduce_conflicts)>1:
-            #reduce reduce conflict
-            return [], reduces,reduce_conflicts
-        else :
-            return [], reduces,[]
-    else : 
-        #shift reduce conflict 
-        return shifts, reduces, []
+                if (count == len(production.definition)-1):
+                    #terminal at end of production 
+                    if ((elem in terminals) and (grammar.empty == elem)) :
+                        current_set.add(grammar.empty)
+                    #nullable non terminal at end of production
+                    elif grammar.empty in elem_set:
+                        current_set.add(grammar.empty)
 
 
-def check_and_add_state(
-        state: List[Item],
-        states: List[List[Item]],
-        shifts: List[Tuple[int, List[Item], List[Item]]], 
-        reduces: List[Tuple[int, List[Item]]],
-        is_reduce:List[ETable],
-        table:List[List[Optional[int]]]
-    ):
-    try : 
-        go_to = states.index(state)
-        table[-1].append(go_to)
-    except: 
-        shifts2, reduces2, reduce_conflicts = check_state_conflicts(state)
-        if shifts2 and reduces2:
-            shifts.append((len(states), shifts2, reduces2))
-            is_reduce.append(ETable.shift_reduce)
-        elif reduce_conflicts:
-            reduces.append((len(states), reduce_conflicts))
-            is_reduce.append(ETable.reduce_reduce)
-        else : 
-            if reduces2:
-                is_reduce.append(ETable.reduce)
-            else : 
-                is_reduce.append(ETable.shift)
-        states.append(state)
-        table[-1].append(len(states)-1)
-    return
-
-def make_action_goto_table(
-        table:List[List[Optional[int]]],
-        is_reduce:List[ETable],
-        states: List[List[Item]]
-        ):
-    end_table = []
-    for row, status, state in zip(table, is_reduce, states) : 
-        # At this point we al ready verify that shift and reduce are free of conlflicts
-        if status == ETable.reduce:
-            # state must be of len 1 or else we have a reduce/reduce confict (or a repeated item in state)
-            new_row = [(ETable.reduce, (state[0].production.name, len(state[0].production.definition))) for _ in row]
-        elif status == ETable.shift : 
-            new_row = [(ETable.shift, i) for i in row ]
-        elif status == ETable.shift_reduce:
-            new_row = []
-            for i,value in enumerate(row) : 
-                if value:
-                    new_row.append((ETable.shift_reduce,value))
-                else : 
-                    new_row.append((ETable.shift_reduce,-1))
-        elif status == ETable.reduce_reduce:
-            new_row = [(ETable.reduce_reduce,0) for _ in row]
-        end_table.append(new_row)
-    return end_table
-
-
-def compute_states(start : Item, rules: Dict[int, Production], 
-        grammar_symbols, debug = None):
-    states = [clousure([start], rules, debug)]
-    table : List[List[Optional[int]]]= []
-    shifts: List[Tuple[int, List[Item], List[Item]]] = []
-    reduces: List[Tuple[int, List[Item]]] = []
-    is_reduce : List[ETable]= [ETable.shift] #this Shift is a hack, we need to add  a correct check for state 0
-    old_index = 0
-    added_new = True
-    while added_new:
-        added_new = False
-        start_index = old_index
-        old_index = len(states)
-        for i, items in enumerate(states[start_index:]):
-            if is_reduce[i+start_index] == ETable.reduce:
-                table.append([None for _ in grammar_symbols])
-                continue
-            else : 
-                table.append([])
-            #table.append([])
-            for symbol in grammar_symbols:
-                if (state := primitive_goto(items, symbol, rules, debug)):
-                    check_and_add_state(
-                        state, 
-                        states,
-                        shifts, 
-                        reduces,
-                        is_reduce,
-                        table
-                    )
-                    added_new = True
-                    #try : 
-                    #    go_to = states.index(state)
-                    #    table[-1].append(go_to)
-                    #except: 
-                    #    shifts, reduces, reduce_conflicts = check_state(state)
-                    #    if shifts and reduces:
-                    #        conflicts_shift.append((len(states), shifts, reduces))
-                    #        is_reduce.append(ETable.shift_reduce)
-                    #    elif reduce_conflicts:
-                    #        conflicts_reduce.append((len(states), reduce_conflicts))
-                    #        is_reduce.append(ETable.reduce_reduce)
-                    #    else : 
-                    #        if reduces:
-                    #            is_reduce.append(ETable.reduce)
-                    #        else : 
-                    #            is_reduce.append(ETable.shift)
-                    #    states.append(state)
-                    #    table[-1].append(len(states)-1)
-                    #    added_new = True
-                else :
-                    table[-1].append(None)
-    end_table = make_action_goto_table(table, is_reduce, states)
-    #end_table = []
-    #for row, status,state in zip(table, is_reduce, states) : 
-    #    # At this point we al ready verify that shift and reduce are free of conlflicts
-    #    if status == ETable.reduce:
-    #        # state must be of len 1 or else we have a reduce/reduce confict (or a repeated item in state)
-    #        new_row = [(ETable.reduce, state[0].production.name) for _ in row]
-    #    elif status == ETable.shift : 
-    #        new_row = [(ETable.shift, i) for i in row ]
-    #    elif status == ETable.shift_reduce:
-    #        new_row = []
-    #        for i,value in enumerate(row) : 
-    #            if value:
-    #                new_row.append((ETable.shift_reduce,value))
-    #            else : 
-    #                new_row.append((ETable.shift_reduce,-1))
-    #    elif status == ETable.reduce_reduce:
-    #        new_row = [(ETable.reduce_reduce,0) for _ in row]
-    #    end_table.append(new_row)
-    return states, end_table, (shifts, reduces)
-                        
-
-
-def find_expressions_for_rules(rules : Dict[int, List[Production]]):
-    solved : Dict[int, List[int]] = dict()
-    unsolved : Dict[int, List[List[int]]] = dict()
-    for name, productions in rules.items() : 
-        if productions[0].terminal :
-            solved[name] = [name]
-        else : 
-            ref : List[List[int]] = []
-            unsolved[name] = ref
-            for i in productions:
-                ref.append([* (i.definition)]) 
-    
-
-    def subs(ps: List[List[int]], key : int, value: List[int]):
-        for p in ps:
-            for i,val in enumerate(p):
-                if val == key:
-                    p[i] = value
-        return
-
-    def is_solved(ps: List[List[Union[List[int], int]]])->Optional[List[int]]:
-        for p in ps:
-            has_int = False
-            for val in p:
-                if isinstance(val, int):
-                    has_int = True
-            if not has_int:
-                out : List[int] = []
-                for w in p : 
-                    out+=w
-                return out
-        return None
-
-    cant_solve = False
-    while unsolved:
-        to_delete = []
-        for name,rule in unsolved.items(): 
-            for solution_name ,solution in solved.items() : 
-                subs(rule, solution_name, solution)
-            msolved = is_solved(rule)
-            if not (msolved is None): 
-                solved[name] = msolved
-                to_delete.append(name)
-                continue
-
-        for name in to_delete:
-            unsolved.pop(name)
-
-        if not to_delete:
-            cant_solve = True
-            break
-
-    return solved, cant_solve
-
-def find_path(state1: int, state2: int, table:List[List[Tuple[ETable, int]]])->List[int]:
-
-    visited: List[int] = []
-    paths: List[List[int]] = [[state1]]
-    added_new = False
-
-    while added_new : 
-        for path in paths : 
-            top = path[-1]
-            new_paths = []
-            for status, next_state in table[top]:
-                if (status == ETable.shift) and (next_state) and (not next_state in visited):
-                    if next_state == state2:
-                        path.append(state2)
-                        return path
-                    new_paths.append(path.copy())
-                    new_paths[-1].append(next_state)
-                    added_new = True
-            visited.appen(top)
-        paths = new_paths
-                
-    return []
-
-def find_childs(state : int, table:List[List[Tuple[ETable, int]]])->List[List[int]]:
-    out : List[List[int]] = [[state]]
-
-    def is_in(key:int, l:List[List[int]])->bool:
-        for deep in l: 
-            if key in deep:
-                return True
-        return False
-
-    while out[-1]: 
-        out.append([])
-        for state in out[-2]:
-            row = table[state]
-            # skip reduce case since all the row would be a reduce.
-            if row[0][0] != ETable.shift:
-                continue
-            for status,value in row : 
-                if (status == ETable.shift) and (value) and (not is_in(value,out)) :
-                    out[-1].append(value)
-    out.pop()
     return out
 
-def find_valid_values(state : int, table:List[List[Tuple[ETable, int]]])->List[int]:
-    children = find_childs(state, table)
-    values : Set[int] = set()
-    for deep, deep_values in enumerate(children[1:]):
-        for c in deep_values : 
-            # Reduce elements of table has 
-            # table[c] = [(status, (rule_name, production_len)) for _ in range(len(table[c]))]
-            status, value = table[c][0]
-            if status == ETable.reduce:
-                if deep+1 == value[1]:
-                    values.add(value[0])
-    return  [i for i in values]
 
-                    
-                
+def first(rules : List[int], first_sets : Dict[int, Set[int]], grammar : Grammar)->Set[int]: 
+    out = set()
+    for count, x in enumerate(rules) : 
+        if x in grammar.terminals:
+            if x == grammar.empty:
+                continue 
+            else : 
+                out.add(x)
+                break
+        else : 
+            elem_set = first_sets[x]
+            if grammar.empty in elem_set: 
+                out.update(elem_set- {grammar.empty})
+            else : 
+                out.update(elem_set)
+                break
+    if count == len(rules)-1:
+        if (x in grammar.terminals) :
+            if (x == grammar.empty):
+                out.add(grammar.empty)
+        elif  (grammar.empty in elem_set):
+            out.add(grammar.empty)
             
+    return out
 
 
-def test(a:int)->None:
-    names = ["S", "E", "$", "-", "T", "n", "(", ")"]
-    nmap: Dict[str, int] = dict()
-    for i,name in  enumerate(names):
-        nmap[name] = i
-    rules = list2dict([
-            Production(nmap["S"], (nmap["E"], nmap["$"])),
-            #Production(nmap["S"], (nmap["E"],)),
-            Production(nmap["E"], (nmap["E"], nmap["-"], nmap["T"])),
-            Production(nmap["E"], (nmap["T"],)),
-            Production(nmap["T"], (nmap["n"],)),
-            Production(nmap["T"], (nmap["("], nmap["E"], nmap[")"])),
-            Production(nmap["n"], (0,), True),
-            Production(nmap["-"], (0,), True),
-            Production(nmap["$"], (0,), True),
-            Production(nmap["("], (0,), True),
-            Production(nmap[")"], (0,), True),
-    ])
-    #dic = Map(names, nmap)
-    #logg.debug("Grammar : \n%s", dic.rules2str(rules))
-    #logg.debug("Names to Int \n%s", nmap)
-    #logg.debug("Compute States")
-    states, table, conflicts= compute_states(
-            Item(rules[nmap["S"]][0], 0, (0, )), rules,
-            grammar_symbols = [i for i,j in enumerate(names)], debug=None)
+def follow(first_sets : Dict[int, Set[int]], grammar : Grammar)->Dict[int, Set[int]]: 
+    out : Dict[int, Set[int]]= dict()
+    for key in grammar.productions:
+        out[key]=set()
+    out[grammar.start].add(grammar.input)
+    added = True
+    while added:
+        added=False
+        for key,rule in grammar.productions.items():
+            for production in rule:
+                for count, x in enumerate(production.definition) : 
+                    if not (x in grammar.terminals):
+                        sufix = production.definition[count+1:]
+                        current  = out[x]
+                        if sufix:
+                            fsufix = first(sufix, first_sets, grammar)
+                            if grammar.empty in fsufix:
+                                fsufix_no_empty =fsufix-{grammar.empty} 
+                                production_follow = out[production.name]
+                                union = fsufix_no_empty.union(production_follow)
+                                if not (union <= current):
+                                    added=True
+                                    out[x].update(union)
+                            else : 
+                                if not (fsufix <= current):
+                                    added=True
+                                    out[x].update(fsufix)
+                        else : 
+                            production_follow = out[production.name]
+                            if not (production_follow <= current):
+                                added=True
+                                current.update(production_follow)
+    return out
+
+
+def clousure(I: List[Item], first_sets : Dict[int, Set[int]], grammar:Grammar)->List[Item]: 
+    C = I
+    added = True
+    while added:
+        added = False
+        #print(items2str(C, grammar))
+        for item in C : 
+            if not item.is_at_end():
+                current_symbol = item.current()
+                suffix = item.production.definition[item.dot+1:]
+                #print(grammar.names[current_symbol], *map(lambda x: grammar.names[x], suffix))
+                if current_symbol in grammar.terminals:
+                    continue
+                for production in grammar.productions[current_symbol]: 
+                    aux = first([*suffix,*item.look_ahead], first_sets, grammar)
+                    for maybe_terminal in first([*suffix,*item.look_ahead], first_sets, grammar):
+                        #print(aux)
+                        if maybe_terminal in grammar.terminals:
+                            to_add = Item(production, 0, (maybe_terminal,))
+                            #print("TOAD ", items2str([to_add], grammar))
+                            if not to_add in C:
+                                C.append(to_add)
+                                added = True
+    return C
+
+def goto(state: List[Item], symbol: int, first_sets: Dict[int, Set[int]], grammar: Grammar):
+    out = []
+    for item in state:
+        if not item.is_at_end():
+            if item.current() == symbol:
+                out.append(Item(item.production, item.dot+1, item.look_ahead))
+    #print("PRECLOUSURE")
+    #print(items2str(out, grammar))
+    return clousure(out, first_sets, grammar)
+
+def make_items(grammar: Grammar)->Tuple[List[List[Item]], Dict[int, Set[int]]]:
+    #n = len(grammar.names)
+    #grammar.names.append("NEW_START_SYMBOL")
+    #grammar.productions[n] = [Production(n, (grammar.start,))]
+    first_sets = first_on_rules(grammar)
+    #C = [clousure([Item(grammar.productions[n][0],0, (grammar.end, ))],first_sets, grammar)]
+    #print(items2str(C[0], grammar))
+
+    #exit()
+    C = [clousure([Item(n,0, (grammar.end, )) for n in (grammar.productions[grammar.start]) ],first_sets, grammar)]
+    
+    added = True
+    acc = 0
+    while added :
+        added=False
+        #for i,c in enumerate(C) :
+        #    print("ITER ", acc, i)
+        #    print(items2str(c, grammar))
+        #if acc >0:
+        #    exit()
+        #current_len = len(C)
+        for I in C: #[:current_len]: 
+            for symbol in range(len(grammar.names)):
+                #print(symbol)
+                #print("Calll goto ", items2str(I, grammar))
+                got = goto (I, symbol, first_sets, grammar)
+                if got and (not got in C):
+                    added = True
+                    C.append(got)
+        #print(items2str(got, grammar))
+        #exit()
+        acc+=1
+    return C, first_sets
+
+
+def make_table(grammar: Grammar):
+    states, first_sets = make_items(grammar)
+    action = [[(ETable.error,-1) for _ in range(len(grammar.names))] for _ in range(len(states))]
+    got = [[-1 for _ in range(len(grammar.names))] for _ in range(len(states))]
+    for i, state in enumerate(states):
+        for rule_name in grammar.productions:
+            new = goto(state, rule_name, first_sets, grammar)
+            if new : 
+                value = states.index(new)
+                got[i][rule_name] =  value
+
     for i,state in enumerate(states) : 
-        print(i,"{")
-        for item in state : 
-            pre_dot = " ".join(map(lambda x: names[x], item.production.definition[:item.dot]))
-            pos_dot = " ".join(map(lambda x: names[x], item.production.definition[item.dot:]))
-            name = names[item.production.name]
-            print(f"    {name} -> {pre_dot} · {pos_dot} {item.look_ahead}")
+        print(i, " {")
+        print("    ", items2str(state, grammar))
         print("}")
 
-    #Purge states
+    shifts : List[List[Tuple[ETable, int]]] = []
+    reduces : List[List[Tuple[ETable, int]]]= []
+    for i,state in enumerate(states):
+        shifts.append([])
+        reduces.append([])
+        for item in state:
+            if item.is_at_end():
+                print(item.to_string(grammar), item.is_at_end())
+                if action[i][item.look_ahead[0]][1] == -1 :
+                    action[i][item.look_ahead[0]] = (ETable.reduce, (item.production.name, len(item.production.definition)))
+                else:
+                    reduces[-1].append((ETable.reduce, (item.production.name, len(item.production.definition))))
+            else : 
+                new = goto(state, item.look_ahead[0], first_sets, grammar)
+                if new : 
+                    value = states.index(new)
+                    if action[i][item.look_ahead[0]][1] == -1 :
+                        action[i][item.look_ahead[0]] = (ETable.shift, value)
+                    else : 
+                        shifts[-1].append((ETable.shift, value))
+    return action, got, shifts, reduces
 
-    non_terminals : List[int] = []
 
-    for p in rules.values():
-        if not p[0].terminal : 
-            non_terminals.append(p[0].name)
+def items2str(state: List[Item], grammar: Grammar):
+    out = []
+    for it in state : 
+        name = grammar.names[it.production.name]
+        pre_dot = " ".join(map(lambda x: grammar.names[x], it.production.definition[:it.dot]))
+        pos_dot = " ".join(map(lambda x: grammar.names[x], it.production.definition[it.dot:]))
+        out.append(f"{name} -> {pre_dot} · {pos_dot} {grammar.names[it.look_ahead[0]]}")
+    return "\n    ".join(out)
 
-    for number, row in enumerate(table) : 
-        if row[0][0] == ETable.reduce:
-            continue
-        valid_values = find_valid_values(number, table)
-        for mark in non_terminals:
-            code, state = row[mark]
-            if (code == ETable.shift) and ((state is None) and (not mark in valid_values)):
-                table[number][mark] = (ETable.invalid, None)
+def test_ll1():
+    names = ["!", "?", "(", ")", "STRING", "empty", "Session", "Question", "Fact", "Facts"]
+    names2int = dict((j,i) for i,j in enumerate(names))
+    string_productions = [
+            ["Session", "Facts", "Question"],
+            ["Session", "(", "Session", ")" , "Session"],
+            ["Facts", "Fact", "Facts"],
+            ["Facts", "empty"] ,
+            ["Fact", "!", "STRING"],
+            ["Question", "?", "STRING"]
+            ]
+    string_non_terminals = set(x[0] for x in string_productions)
+    string_terminals = [x for x in names if not (x in string_non_terminals)]
 
-    print("  ",end="")
-    for name in names:
-        print(name,"     ", end="")
-    print()
-    for i, row in enumerate(table):
-        to_print=[]
-        for code, state in row: 
-            if code ==ETable.reduce:
-                to_print.append("r{}".format(state).ljust(5))
-            elif code ==ETable.shift:
-                if state: 
-                    to_print.append("s{}".format(state).ljust(5))
-                else : 
-                    to_print.append("e    ")
-            elif code == ETable.shift_reduce:
-                if state >-1:
-                    to_print.append("sR{}".format(state).ljust(4))
-                else : 
-                    to_print.append("R/S  ")
-            elif code == ETable.reduce_reduce:
-                to_print.append("R/R  ")
-            elif code == ETable.invalid:
-                to_print.append("inv  ")
+    rules = names2productions(string_productions, names2int)
+    terminals = names2terminals(string_terminals, names2int)
+    productions = rules_list2dict(rules)
 
-        print(i, "  ".join(to_print))
+    grammar = Grammar(names2int["Session"], productions, terminals, names2int["empty"],names)
+    f = first_on_rules(grammar)
+    print(names2int)
+    print(f)
+    print(follow(f, grammar))
 
-    expression, status = find_expressions_for_rules(rules)
-    print(expression)
-    for name, coded in expression.items(): 
-        rule_name = names[name] 
-        to_print = []
-        for value in coded : 
-            to_print.append(names[value])
-        print(f"{rule_name} = {''.join(to_print)}")
+def test():
+    names = ["n", "-", "(", ")", "S", "E", "T", "empty"]
+    names2int = dict((j,i) for i,j in enumerate(names))
+    string_productions = [
+        ["S", "E" ],
+        ["E", "E", "-", "T"],
+        ["E", "T"],
+        ["T", "n"],
+        ["T", "(", "E", ")"],
+            ]
+    #names = ["S", "C", "c", "d", "empty"]
+    #names2int = dict((j,i) for i,j in enumerate(names))
+    #string_productions = [
+    #        ["S", "C", "C"],
+    #        ["C", "c", "C"],
+    #        ["C", "d"],
+    #        ]
+    string_non_terminals = set(x[0] for x in string_productions)
+    string_terminals = [x for x in names if not (x in string_non_terminals)]
+
+    rules = names2productions(string_productions, names2int)
+    terminals = names2terminals(string_terminals, names2int)
+    productions = rules_list2dict(rules)
+
+    grammar = Grammar(names2int["S"], productions, terminals, names2int["empty"],names)
+    #f = first_on_rules(grammar)
+    
+    actions, got, shifts, reduces = make_table(grammar)
+
+    out= []
+    print("    "," ".join(map(lambda x : x[:5].ljust(5), grammar.names)))
+    for i, row in enumerate(actions):
+        out.append(str(i).ljust(4))
+        for code, number in row : 
+            if code == ETable.error:
+                out.append("e".ljust(5))
+            elif code == ETable.shift:
+                out.append("s{}".format(number).ljust(5))
+            elif code == ETable.reduce:
+                rule_name, lenght = number
+                out.append("r{}".format(grammar.names[rule_name]).ljust(5))
+        print(" ".join(out))
+        out=[]
+
+    for row in got:
+        print("   "," ".join(map(lambda x : str(x).ljust(5), row)))
+    
+
+
 
     
 
-    for i, row in enumerate(table):
-        for code, state in row: 
-            if code ==ETable.shift:
-                if  not state: 
-                    find_path(i, state, table):
-                    
+test()
+
+
         
 
-    
 
 
-
-
-
-
-
-
-test(1)
